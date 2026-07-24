@@ -1,0 +1,24 @@
+{"user_id": 115628307, "event": "start", "ts": 1784766863.4185994}
+{"user_id": 115628307, "event": "diagnostic_completed", "ts": 1784767133.045998, "meta": {"correct": 1, "total": 3}}
+{"user_id": 115628307, "event": "first_learning_action", "ts": 1784767133.414362, "meta": {"path": "diagnostic"}}
+{"user_id": 115628307, "event": "return", "ts": 1784767524.8778603}
+{"user_id": 8650936164, "event": "start", "ts": 1784767768.379356}
+{"user_id": 8650936164, "event": "first_learning_action", "ts": 1784767794.896547, "meta": {"path": "quick"}}
+{"user_id": 115628307, "event": "return", "ts": 1784844623.6205468}
+{"user_id": 115628307, "event": "start", "ts": 1784846039.3093138}
+{"user_id": 115628307, "event": "diagnostic_completed", "ts": 1784846082.1149735, "meta": {"correct": 1, "total": 3}}
+{"user_id": 115628307, "event": "first_learning_action", "ts": 1784846082.3483374, "meta": {"path": "diagnostic"}}
+{"user_id": 8650936164, "event": "start", "ts": 1784846391.8262603}
+{"user_id": 8650936164, "event": "first_learning_action", "ts": 1784846395.335399, "meta": {"path": "quick"}}
+{"user_id": 8650936164, "event": "start", "ts": 1784848192.9715447}
+{"user_id": 8650936164, "event": "diagnostic_completed", "ts": 1784848238.1124895, "meta": {"correct": 2, "total": 3}}
+{"user_id": 8650936164, "event": "first_learning_action", "ts": 1784848238.3256407, "meta": {"path": "diagnostic"}}
+{"user_id": 115628307, "event": "start", "ts": 1784848272.3946245}
+{"user_id": 115628307, "event": "diagnostic_completed", "ts": 1784848283.1132846, "meta": {"correct": 1, "total": 3}}
+{"user_id": 115628307, "event": "first_learning_action", "ts": 1784848283.3413477, "meta": {"path": "diagnostic"}}
+{"user_id": 115628307, "event": "start", "ts": 1784849539.4587095}
+{"user_id": 115628307, "event": "diagnostic_completed", "ts": 1784849562.0875218, "meta": {"correct": 1, "total": 3}}
+{"user_id": 115628307, "event": "first_learning_action", "ts": 1784849589.284899, "meta": {"path": "diagnostic"}}
+{"user_id": 115628307, "event": "start", "ts": 1784849644.3794324}
+{"user_id": 115628307, "event": "first_learning_action", "ts": 1784849650.5193381, "meta": {"path": "quick"}}
+{"user_id": 115628307, "event": "return", "ts": 1784849661.551661}

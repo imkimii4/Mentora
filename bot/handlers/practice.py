@@ -1,0 +1,457 @@
+"""
+دو مسیر مستقل از لسون که از کیبورد پایین صفحه وارد می‌شن:
+
+- TestMode: تست ترکیبی از بانک ۵۱ سوالی (test_bank_L1.json). تعداد سوال با
+  انتخاب کاربر (۵/۱۰/۱۵)، بدون تکرار تا کاربر کل بانک رو نبینه (seen_questions_store).
+  سوالاتی که متن/گزینه‌هاشون تو محدودیت Telegram Quiz Poll جا می‌شه (سوال حداکثر
+  ۳۰۰ کاراکتر، هر گزینه حداکثر ۱۰۰ کاراکتر) با Poll بومی تلگرام پرسیده می‌شن —
+  گزینه‌ها زیر سوال به‌صورت لیست کامل میان، نه دکمه‌ی تنگ‌شونده. سوالاتی که آیه‌ی
+  طولانی تو گزینه‌هاشونه (چندتاشون از ۱۰۰ کاراکتر رد می‌زنن) با روش قبلی (متن کامل
+  تو پیام + دکمه‌ی حرف کوتاه) پرسیده می‌شن، چون Poll تحملشون نمی‌کنه.
+
+- FlashcardMode: مرور فلش‌کارتی (flashcards_L1.json). هر کارت: نمایش سوال ->
+  «نمایش جواب» -> خودارزیابی (بلد بودم/نبودم، بدون AI).
+
+هر دو مسیر جواب‌ها رو خام تو practice_store لاگ می‌کنن (با session_id برای
+مقایسه‌ی «نسبت به جلسه‌ی قبل»)؛ تحلیل عمیق‌تر (سرعت/دقت، گپ مفهومی) بعد از
+لانچ با داده‌ی واقعی انجام می‌شه.
+"""
+from __future__ import annotations
+
+import random
+import re
+import time
+import uuid
+from html import escape
+
+from aiogram import Router, F, Bot
+from aiogram.filters import Command
+from aiogram.types import CallbackQuery, Message, PollAnswer, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.context import FSMContext
+
+from bot.states import TestMode, FlashcardMode
+from bot.data_loader import load_test_bank, load_flashcards
+from bot.renderer import render_options_list
+from bot.keyboards import (
+    main_menu_reply_keyboard,
+    test_count_keyboard,
+    test_choice_keyboard,
+    flashcard_count_keyboard,
+    flashcard_reveal_keyboard,
+    flashcard_selfcheck_keyboard,
+    review_sections_keyboard,
+)
+from bot.practice_store import log_test_answer, log_flashcard_result, get_session_accuracies
+from bot.seen_questions_store import get_seen, mark_seen, reset_seen
+
+router = Router()
+
+_PERSIAN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
+
+# حالت‌های تشویقی/سازنده بعد از هر جواب - عمداً کلمه‌ی «غلط»/«اشتباه» توشون نیست
+# (طبق فیدبک: لحن باید رشدمحور باشه، نه قضاوتی).
+_CORRECT_FEEDBACK = [
+    "✅ آفرین، درست بود!",
+    "✅ دقیقاً همینه!",
+    "✅ عالی بود!",
+]
+
+# ۱۰ حالت رندوم برای وقتی جواب درست نبود - همیشه یه تیکه‌ش بولد می‌شه.
+_REVIEW_SUGGESTIONS = [
+    "<b>فرصت خوبیه</b> که این بخش رو یه بار دیگه مرور کنی.",
+    "<b>یه نگاه دوباره</b> به این بخش بنداز، کمکت می‌کنه.",
+    "این بخش رو <b>یه بار دیگه بخون</b>، جا میفته.",
+    "<b>ارزششو داره</b> یه دوره‌ی سریع رو این بخش بزنی.",
+    "با <b>یه مرور کوتاه</b> این بخش، دفعه‌ی بعد راحت‌تری.",
+    "<b>قوی‌تر شدن از همینجا شروع می‌شه</b> - یه نگاه دوباره بنداز.",
+    "این یکی رو <b>بذار تو لیست مرور</b>، زود جا میفته.",
+    "<b>یه بار دیگه با هم مرورش کنیم</b>، بهتر می‌شه.",
+    "<b>نکته‌ی این بخش رو یه بار دیگه ببین</b>، کمک می‌کنه.",
+    "<b>یه مرور کوچیک</b> همینجا فرق رو نشون می‌ده.",
+]
+
+# آستانه‌ی «جواب خیلی سریع» - واقع‌بینانه نمی‌شه تو کمتر از این خوند+فهمید+انتخاب کرد.
+_FAST_ANSWER_THRESHOLD_SECONDS = 2.5
+
+# وقتی یه جواب خیلی سریع میاد، همون لحظه (نه فقط تو جمع‌بندی آخر) یکی از
+# اینا رو هم به فیدبک اضافه می‌کنیم - لحن معلم خصوصی دلسوز، نه گیر دادن یا
+# متهم کردن به تقلب.
+_FAST_ANSWER_NUDGES = [
+    "⏱️ یه لحظه صبر کن، انگار این یکی رو با عجله زدی. وقتتو بذار رو خوندن سوال.",
+    "⏱️ آروم‌تر برو، عجله نکن. این تست فقط برای نمره نیست، برای اینه که بفهمی کجا رو بلدی.",
+    "⏱️ انگار سریع جواب دادی. یه بار دیگه سوال بعدی رو با دقت بخون.",
+    "⏱️ وقت زیاده، عجله نکن. هرچی دقیق‌تر جواب بدی، خودتم بهتر می‌فهمی کجاها ضعیفی.",
+    "⏱️ یکم آروم‌تر. هدف اینه که واقعاً یاد بگیری، نه فقط رد کردن سوال.",
+    "⏱️ این یکی خیلی سریع رفت. یه نفس بکش، سوال بعدی رو با دقت بخون.",
+    "⏱️ سرعتت بالاست، ولی دقت مهم‌تره. یکم بیشتر روی هر سوال وقت بذار.",
+]
+
+
+def _test_next_question_keyboard(label: str = "➡️ سؤال بعدی") -> InlineKeyboardMarkup:
+    # کیبورد اختصاصی و مستقل از keyboards.py - callback_data جدا از هر namespace
+    # دیگه (quiz_choice/test_choice/continue) تا با کلیک‌های قدیمیِ مسیرهای
+    # دیگه قاطی نشه. label قابل تغییره تا برای آخرین سؤال، لیبل واقعی‌تر
+    # («مشاهده نتیجه تست») نشون بدیم؛ callback_data و handler همیشه یکی می‌مونه
+    # چون _send_test_question خودش تشخیص می‌ده تست تموم شده یا نه.
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=label, callback_data="test_next_question")]]
+    )
+
+
+def _extract_section_ids(section_ref: str) -> list[str]:
+    """از یه رشته مثل 'بخش ۶ (اسراء ۱۹)' یا 'بخش ۱۰ و ۱۲' آی‌دی بخش(ها) رو
+    در میاره -> ['S6'] یا ['S10', 'S12']."""
+    numbers = re.findall(r"بخش\s*([۰-۹]+)", section_ref)
+    return [f"S{n.translate(_PERSIAN_DIGITS)}" for n in numbers]
+
+
+def _question_fits_poll(q: dict) -> bool:
+    """محدودیت‌های Telegram Quiz Poll: سوال حداکثر ۳۰۰ کاراکتر، هر گزینه
+    حداکثر ۱۰۰ کاراکتر، بین ۲ تا ۱۰ گزینه. چندتا از سوالای بانک (اونایی که
+    آیه‌ی کامل تو گزینه‌هاشونه) از این رد می‌زنن."""
+    if not (1 <= len(q["q"]) <= 300):
+        return False
+    if not (2 <= len(q["options"]) <= 10):
+        return False
+    if any(len(o) > 100 for o in q["options"]):
+        return False
+    return True
+
+
+# ---------- ورود از کیبورد پایین صفحه ----------
+
+async def prompt_test_count(bot: Bot, chat_id: int, state: FSMContext) -> None:
+    await state.set_state(TestMode.choosing_count)
+    await bot.send_message(chat_id, "چند تا سوال بزنیم؟", reply_markup=test_count_keyboard())
+
+
+async def prompt_flashcard_count(bot: Bot, chat_id: int, state: FSMContext) -> None:
+    await state.set_state(FlashcardMode.choosing_count)
+    await bot.send_message(chat_id, "چند تا فلش‌کارت مرور کنیم؟", reply_markup=flashcard_count_keyboard())
+
+
+@router.message(Command("test"))
+async def cmd_test(message: Message, state: FSMContext):
+    await prompt_test_count(message.bot, message.chat.id, state)
+
+
+@router.message(Command("flashcard"))
+async def cmd_flashcard(message: Message, state: FSMContext):
+    await prompt_flashcard_count(message.bot, message.chat.id, state)
+
+
+# ---------- تست ترکیبی ----------
+
+async def _begin_test(bot: Bot, chat_id: int, user_id: int, state: FSMContext, questions: list[dict]) -> None:
+    await state.update_data(
+        test_session_id=str(uuid.uuid4()),
+        test_questions=questions,
+        test_index=0,
+        test_correct=0,
+        test_wrong_sections=[],
+        test_fast_answers=0,
+    )
+    await _send_test_question(bot, chat_id, state)
+
+
+@router.callback_query(F.data.startswith("test_count:"), TestMode.choosing_count)
+async def start_test(callback: CallbackQuery, state: FSMContext):
+    count = int(callback.data.split(":")[1])
+    await callback.answer()
+
+    user_id = callback.from_user.id
+    bank = load_test_bank("L1")["questions"]
+    seen = get_seen(user_id)
+    unseen = [q for q in bank if q["id"] not in seen]
+
+    if len(unseen) < count:
+        # کل بانک (یا بیشترش) رو قبلاً دیده؛ دور جدید رو از صفر شروع می‌کنیم.
+        reset_seen(user_id)
+        unseen = bank
+
+    count = min(count, len(unseen))
+    selected = random.sample(unseen, count)
+    mark_seen(user_id, [q["id"] for q in selected])
+
+    await _begin_test(callback.bot, callback.message.chat.id, user_id, state, selected)
+
+
+@router.callback_query(F.data.startswith("retest:"))
+async def retest_weak_sections(callback: CallbackQuery, state: FSMContext):
+    """دکمه‌ی «🔁 تمرین جدید همین بخش‌ها» - از همون بخش‌هایی که کاربر غلط زده،
+    یه ست تست کوچیک جدید می‌سازه. این عمداً از سیستم seen/unseen رد می‌شه چون
+    کاربر خودش صریحاً خواسته دقیقاً همین بخش‌ها رو تمرین کنه."""
+    target_ids = set(callback.data.split(":", 1)[1].split(","))
+    await callback.answer()
+
+    bank = load_test_bank("L1")["questions"]
+    matching = [q for q in bank if set(_extract_section_ids(q.get("section_ref", ""))) & target_ids]
+    if not matching:
+        await callback.message.answer("سوال دیگه‌ای از این بخش‌ها تو بانک نداریم فعلاً.")
+        return
+
+    count = min(5, len(matching))
+    selected = random.sample(matching, count)
+    await state.set_state(TestMode.awaiting_answer)
+    await _begin_test(callback.bot, callback.message.chat.id, callback.from_user.id, state, selected)
+
+
+@router.callback_query(F.data.startswith("quick_review:"))
+async def quick_review(callback: CallbackQuery, state: FSMContext):
+    """دکمه‌ی «🎴 مرور سریع» - به‌جای اینکه کاربر رو مجبور کنه کل بخش (که
+    ممکنه فقط برای یه سؤال باشه) رو دوباره بخونه، همون فلش‌کارت‌هایی که به
+    این بخش‌ها مربوطن رو نشون می‌ده - نکته‌ی کلیدی، نه متن کامل بخش."""
+    target_ids = set(callback.data.split(":", 1)[1].split(","))
+    await callback.answer()
+
+    cards = load_flashcards("L1")["cards"]
+    matching = [c for c in cards if set(_extract_section_ids(c.get("section_ref", ""))) & target_ids]
+    if not matching:
+        await callback.message.answer(
+            "فعلاً فلش‌کارتی برای این بخش‌ها نداریم؛ می‌تونی از «این بخش‌ها رو کامل بخون» استفاده کنی."
+        )
+        return
+
+    await state.update_data(fc_cards=matching, fc_index=0, fc_known=0)
+    await _send_flashcard(callback.bot, callback.message.chat.id, state)
+
+
+async def _send_test_question(bot: Bot, chat_id: int, state: FSMContext) -> None:
+    data = await state.get_data()
+    questions = data["test_questions"]
+    index = data["test_index"]
+
+    if index >= len(questions):
+        await _finish_test(bot, chat_id, state)
+        return
+
+    q = questions[index]
+    options = list(q["options"])
+    correct_text = options[q["correct"]]
+    random.shuffle(options)
+    shuffled_correct_index = options.index(correct_text)
+
+    await state.update_data(
+        current_q_options=options,
+        current_q_correct_index=shuffled_correct_index,
+        current_q_id=q["id"],
+        current_q_section=q.get("section_ref", ""),
+        current_q_sent_at=time.time(),
+        current_q_poll_id=None,
+    )
+
+    header = f"📝 سوال {index + 1} از {len(questions)}:\n\n"
+
+    if _question_fits_poll(q):
+        # Telegram Quiz Poll بومی: گزینه‌ها زیر سوال به‌شکل کامل و تمیز میان،
+        # خودِ تلگرام درست/غلط رو با رنگ نشون می‌ده.
+        sent = await bot.send_poll(
+            chat_id,
+            question=(header + q["q"])[:300],
+            options=options,
+            type="quiz",
+            correct_option_id=shuffled_correct_index,
+            is_anonymous=False,
+        )
+        await state.update_data(current_q_poll_id=sent.poll.id)
+    else:
+        # فقط برای سوالاتی که آیه‌ی کامل تو گزینه‌شونه و از محدودیت Poll رد می‌زنن.
+        text = header + escape(q["q"]) + "\n\n" + render_options_list(options)
+        await bot.send_message(
+            chat_id, text, reply_markup=test_choice_keyboard(options), parse_mode="HTML"
+        )
+
+    await state.set_state(TestMode.awaiting_answer)
+
+
+async def _process_test_answer(bot: Bot, chat_id: int, state: FSMContext, chosen_index: int, user_id: int) -> None:
+    data = await state.get_data()
+    correct_index = data["current_q_correct_index"]
+    options = data["current_q_options"]
+    is_correct = chosen_index == correct_index
+    seconds_taken = time.time() - data["current_q_sent_at"]
+    is_fast = seconds_taken < _FAST_ANSWER_THRESHOLD_SECONDS
+
+    if is_correct:
+        feedback = random.choice(_CORRECT_FEEDBACK)
+    else:
+        feedback = f"📚 پاسخ درست: <b>{escape(options[correct_index])}</b>\n{random.choice(_REVIEW_SUGGESTIONS)}"
+    if is_fast:
+        # همون لحظه، نه فقط تو جمع‌بندی آخر - کاربر رو سرِ حین کار متوجه می‌کنیم،
+        # نه بعد از اینکه کل تست تموم شد.
+        feedback += "\n\n" + random.choice(_FAST_ANSWER_NUDGES)
+
+    new_test_index = data["test_index"] + 1
+    is_last_question = new_test_index >= len(data["test_questions"])
+    next_label = "📊 مشاهده نتیجه تست" if is_last_question else "➡️ سؤال بعدی"
+    await bot.send_message(
+        chat_id, feedback, reply_markup=_test_next_question_keyboard(next_label), parse_mode="HTML"
+    )
+
+    log_test_answer(
+        user_id=user_id,
+        question_id=data["current_q_id"],
+        section_ref=data["current_q_section"],
+        is_correct=is_correct,
+        seconds_taken=seconds_taken,
+        session_id=data["test_session_id"],
+    )
+
+    wrong_sections = data["test_wrong_sections"]
+    if not is_correct:
+        wrong_sections = wrong_sections + [data["current_q_section"]]
+
+    await state.update_data(
+        test_correct=data["test_correct"] + (1 if is_correct else 0),
+        test_wrong_sections=wrong_sections,
+        test_index=new_test_index,
+        test_fast_answers=data.get("test_fast_answers", 0) + (1 if is_fast else 0),
+    )
+    # به‌جای رفتن خودکار به سؤال بعد، صبر می‌کنیم تا کاربر خودش رو «➡️ سؤال بعدی»
+    # کلیک کنه - همون فرصت خوندن feedback که قبلاً نبود.
+    await state.set_state(TestMode.awaiting_next)
+
+
+@router.callback_query(F.data == "test_next_question", TestMode.awaiting_next)
+async def handle_test_next_question(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await _send_test_question(callback.bot, callback.message.chat.id, state)
+
+
+@router.callback_query(F.data.startswith("test_choice:"), TestMode.awaiting_answer)
+async def handle_test_choice(callback: CallbackQuery, state: FSMContext):
+    chosen_index = int(callback.data.split(":")[1])
+    await callback.answer()
+    await _process_test_answer(callback.bot, callback.message.chat.id, state, chosen_index, callback.from_user.id)
+
+
+@router.poll_answer()
+async def handle_test_poll_answer(poll_answer: PollAnswer, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    if data.get("current_q_poll_id") != poll_answer.poll_id:
+        return  # مربوط به تست فعلی این کاربر نیست (مثلاً poll قدیمی/بی‌ربط)
+    if not poll_answer.option_ids:
+        return  # کاربر رأیش رو پس گرفت (retract)، منتظر رأی بعدی می‌مونیم
+    chosen_index = poll_answer.option_ids[0]
+    await _process_test_answer(bot, poll_answer.user.id, state, chosen_index, poll_answer.user.id)
+
+
+async def _finish_test(bot: Bot, chat_id: int, state: FSMContext) -> None:
+    data = await state.get_data()
+    total = len(data["test_questions"])
+    correct = data["test_correct"]
+    wrong_sections = data["test_wrong_sections"]
+    fast_answers = data.get("test_fast_answers", 0)
+    user_id = chat_id  # چت خصوصیه، چت‌آیدی همون یوزرآیدیه
+
+    # --- یه پیام واحد و جمع‌وجور، به‌جای ۳-۴ تا پیام پشت‌سرهم ---
+    lines = [f"از {total} سؤالی که جواب دادی،\n✅ {correct} تاش رو عالی زدی"]
+    if total - correct:
+        lines.append(f"📚 {total - correct} تای دیگه فرصت دارن که بهتر بشن")
+
+    pct = round((correct / total) * 100) if total else 0
+    lines.append(f"\nنتیجه‌ی تست: {pct}٪")
+
+    # تشخیص جواب‌دادن خیلی سریع (احتمال شانسی‌زدن) - فقط یه یادآوری ملایم،
+    # نه قضاوت. با داده‌ای که همین الان هم لاگ می‌شه (seconds_taken).
+    if total >= 3 and fast_answers / total >= 0.5:
+        lines.append(
+            "\n⏱️ به نظر می‌رسه بعضی سؤالا رو خیلی سریع جواب دادی. "
+            "اگه با دقت بیشتری جواب بدی، نتیجه واقعی‌تر نشون می‌ده چقدر بلدی."
+        )
+
+    weak_review_ids: list[str] = []
+    if wrong_sections:
+        counts: dict[str, int] = {}
+        for section in wrong_sections:
+            counts[section] = counts.get(section, 0) + 1
+        lines.append("\nجایی که می‌تونی قوی‌تر بشی:")
+        for section, cnt in sorted(counts.items(), key=lambda item: -item[1]):
+            lines.append(f"• {section}: {cnt} سؤال نیاز به مرور داره")
+
+        for section in wrong_sections:
+            for sid in _extract_section_ids(section):
+                if sid not in weak_review_ids:
+                    weak_review_ids.append(sid)
+    else:
+        lines.append("\n🎉 همه‌ی سؤال‌ها رو عالی زدی!")
+
+    # دکمه‌ها مستقیم زیر همین پیام میان (نه پیام جدا) - همون کاری که باعث
+    # می‌شد ۳-۴ تا پیام پشت‌سرهم بریزه، الان همه تو یکی جمع شده.
+    keyboard = review_sections_keyboard(weak_review_ids, retest_ids=weak_review_ids) if weak_review_ids else None
+    await bot.send_message(chat_id, "\n".join(lines), reply_markup=keyboard)
+
+    await state.clear()
+
+
+# ---------- فلش‌کارت ----------
+
+@router.callback_query(F.data.startswith("fc_count:"), FlashcardMode.choosing_count)
+async def start_flashcards(callback: CallbackQuery, state: FSMContext):
+    count = int(callback.data.split(":")[1])
+    await callback.answer()
+
+    cards = load_flashcards("L1")["cards"]
+    count = min(count, len(cards))
+    selected = random.sample(cards, count)
+
+    await state.update_data(fc_cards=selected, fc_index=0, fc_known=0)
+    await _send_flashcard(callback.bot, callback.message.chat.id, state)
+
+
+async def _send_flashcard(bot: Bot, chat_id: int, state: FSMContext) -> None:
+    data = await state.get_data()
+    cards = data["fc_cards"]
+    index = data["fc_index"]
+
+    if index >= len(cards):
+        await _finish_flashcards(bot, chat_id, state)
+        return
+
+    card = cards[index]
+    text = f"🎴 کارت {index + 1} از {len(cards)}\n\n{escape(card['front'])}"
+    await bot.send_message(chat_id, text, reply_markup=flashcard_reveal_keyboard(), parse_mode="HTML")
+    await state.set_state(FlashcardMode.awaiting_reveal)
+
+
+@router.callback_query(F.data == "fc_reveal", FlashcardMode.awaiting_reveal)
+async def reveal_flashcard(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    data = await state.get_data()
+    card = data["fc_cards"][data["fc_index"]]
+    await callback.message.answer(
+        f"📝 جواب:\n{escape(card['back'])}", reply_markup=flashcard_selfcheck_keyboard(), parse_mode="HTML"
+    )
+    await state.set_state(FlashcardMode.awaiting_selfcheck)
+
+
+@router.callback_query(F.data.startswith("fc_know:"), FlashcardMode.awaiting_selfcheck)
+async def handle_flashcard_selfcheck(callback: CallbackQuery, state: FSMContext):
+    knew_it = callback.data.split(":")[1] == "yes"
+    await callback.answer()
+    data = await state.get_data()
+    card = data["fc_cards"][data["fc_index"]]
+
+    log_flashcard_result(
+        user_id=callback.from_user.id,
+        card_id=card["id"],
+        section_ref=card.get("section_ref", ""),
+        knew_it=knew_it,
+    )
+
+    await state.update_data(
+        fc_known=data["fc_known"] + (1 if knew_it else 0),
+        fc_index=data["fc_index"] + 1,
+    )
+    await _send_flashcard(callback.bot, callback.message.chat.id, state)
+
+
+async def _finish_flashcards(bot: Bot, chat_id: int, state: FSMContext) -> None:
+    data = await state.get_data()
+    total = len(data["fc_cards"])
+    known = data["fc_known"]
+    await bot.send_message(chat_id, f"🏁 مرور تموم شد: {known} از {total} تا رو بلد بودی.")
+    await state.clear()
+    await bot.send_message(
+        chat_id, "برای ادامه از دکمه‌های پایین انتخاب کن 👇", reply_markup=main_menu_reply_keyboard()
+    )
