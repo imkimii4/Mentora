@@ -29,3 +29,10 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Runtime data
+data/events.jsonl
+data/practice_log.jsonl
+data/onboarding_status.json
+data/feedback_counts.json
+data/seen_questions.json
