@@ -104,12 +104,14 @@ def render_message(msg: dict) -> str:
 
 
 def render_intro(section: dict) -> str:
-    parts = [f"<b>{escape(section['title'])}</b>"]
+    # عنوان بخش دیگه اینجا تکرار نمی‌شه - هدر بخش (تو _send_section_intro در
+    # lesson.py) تنها منبع نمایش عنوانه. این تابع فقط hook و intro رو برمی‌گردونه.
+    parts = []
     if section.get("hook"):
-        parts.append(f"\n{_apply_bold_markers(escape(section['hook']))}")
+        parts.append(_apply_bold_markers(escape(section["hook"])))
     if section.get("intro"):
-        parts.append(f"\n{_apply_bold_markers(escape(section['intro']))}")
-    return "\n".join(parts)
+        parts.append(_apply_bold_markers(escape(section["intro"])))
+    return "\n\n".join(parts)
 
 
 def render_outro(section: dict) -> str:
