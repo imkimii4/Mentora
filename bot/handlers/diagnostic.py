@@ -181,6 +181,7 @@ async def _finish_diagnostic(bot: Bot, chat_id: int, user_id: int, state: FSMCon
     correct = data["diag_correct"]
 
     await state.update_data(onboarding_path="diagnostic")
+    mark_onboarded(user_id, path="diagnostic")
     await bot.send_message(
         chat_id,
         f"از {total} سؤال، {correct} تا رو درست زدی. این فقط یه آشنایی کوتاهه، "
@@ -188,7 +189,6 @@ async def _finish_diagnostic(bot: Bot, chat_id: int, user_id: int, state: FSMCon
         reply_markup=_enter_lesson_keyboard(),
     )
     log_event(user_id, "diagnostic_completed", {"correct": correct, "total": total})
-    mark_onboarded(user_id, path="diagnostic")
 
 
 @router.callback_query(F.data == _ENTER_LESSON_CALLBACK)
