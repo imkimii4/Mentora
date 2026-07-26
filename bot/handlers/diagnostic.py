@@ -181,6 +181,7 @@ async def _finish_diagnostic(bot: Bot, chat_id: int, user_id: int, state: FSMCon
     correct = data["diag_correct"]
 
     await state.update_data(onboarding_path="diagnostic")
+    await state.set_state(None)
     mark_onboarded(user_id, path="diagnostic")
     await bot.send_message(
         chat_id,
