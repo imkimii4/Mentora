@@ -32,6 +32,7 @@ from bot.keyboards import (
 from bot.rule_engine import RuleEngine, QuizSession, TriggeredRule
 from bot.arabic_utils import compare_answers
 from bot.feedback_store import increment as increment_feedback
+from bot.progress_store import set_current_section, mark_section_complete
 from config import ADMIN_CHAT_ID
 
 router = Router()
@@ -160,6 +161,11 @@ async def _send_section_intro(bot: Bot, chat_id: int, lesson_id: str, section_in
         f"{header}\n\n{render_intro(section)}",
         parse_mode="HTML",
     )
+    # چت خصوصیه، چت‌آیدی همون یوزرآیدیه (همون فرض استفاده‌شده تو practice.py).
+    # این تنها نقطه‌ی مشترک ورود به یه section است (خطی، انتخاب مستقیم بخش،
+    # review_queue، و /goto همه از همینجا رد می‌شن) - جای درستی برای آپدیت
+    # current_section بدون نیاز به چند نقطه‌ی هوک جدا.
+    set_current_section(chat_id, lesson_id, section["section_id"])
 
 
 # ---------- ابزار تست: پرش مستقیم به یه بخش خاص (فقط برای ادمین/کیمیا) ----------
@@ -349,6 +355,11 @@ async def _finish_section(bot: Bot, chat_id: int, state: FSMContext) -> None:
     outro = render_outro(section)
     if outro:
         await bot.send_message(chat_id, outro, parse_mode="HTML")
+
+    # completed_sections فقط از همین نقطه ثبت می‌شه (طبق تصمیم) - idempotent،
+    # پس اگه کاربر یه section رو دوباره ببینه (مثلاً از انتخاب مستقیم بخش)،
+    # duplicate اضافه نمی‌شه.
+    mark_section_complete(chat_id, lesson_id, section["section_id"])
 
     # به‌جای رفتن خودکار به بخش بعد، صبر می‌کنیم تا کاربر یا فیدبک بده یا مستقیم بره جلو.
     await bot.send_message(
