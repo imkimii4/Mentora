@@ -22,6 +22,7 @@ import random
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 from html import escape
 
 from aiogram import Router, F, Bot
@@ -36,13 +37,17 @@ from bot.keyboards import (
     main_menu_reply_keyboard,
     test_count_keyboard,
     test_choice_keyboard,
+    test_retry_keyboard,
     flashcard_count_keyboard,
     flashcard_reveal_keyboard,
     flashcard_selfcheck_keyboard,
     review_sections_keyboard,
+    test_result_success_keyboard,
+    test_result_needs_review_keyboard,
 )
 from bot.practice_store import log_test_answer, log_flashcard_result, get_session_accuracies
 from bot.seen_questions_store import get_seen, mark_seen, reset_seen
+from bot.learning_state_store import record_active_day
 
 router = Router()
 
@@ -236,21 +241,31 @@ async def _send_test_question(bot: Bot, chat_id: int, state: FSMContext) -> None
         current_q_correct_index=shuffled_correct_index,
         current_q_id=q["id"],
         current_q_section=q.get("section_ref", ""),
+        current_q_hint=q.get("hint"),
         current_q_sent_at=time.time(),
         current_q_poll_id=None,
+        # هر دو flag برای هر سوال جدید ریست می‌شن: hint_shown تشخیص «تلاش
+        # اول یا retry»، settled جلوی finalize دوباره‌ی همون سوال رو می‌گیره.
+        current_q_hint_shown=False,
+        current_q_settled=False,
     )
 
     header = f"📝 سوال {index + 1} از {len(questions)}:\n\n"
 
     if _question_fits_poll(q):
-        # Telegram Quiz Poll بومی: گزینه‌ها زیر سوال به‌شکل کامل و تمیز میان،
-        # خودِ تلگرام درست/غلط رو با رنگ نشون می‌ده.
+        # قبلاً type="quiz" بود با correct_option_id. برای Hint+Retry به
+        # type="regular" تغییر کرد چون Quiz Poll بعد از اولین رأی از سمت
+        # کلاینت تلگرام قفل می‌شه (امکان رأی دوباره نیست) و جواب درست رو
+        # native نشون می‌ده - هر دو با این feature در تضادن. Regular Poll
+        # اجازه‌ی رأی دوباره (نامحدود) می‌ده؛ محدودکردن به دقیقاً یک retry
+        # وظیفه‌ی خودِ کد شده (current_q_hint_shown/current_q_settled در
+        # handle_test_poll_answer)، نه تلگرام. correct_option_id فقط برای
+        # type="quiz" معتبره، برای regular اصلاً نباید پاس داده بشه.
         sent = await bot.send_poll(
             chat_id,
             question=(header + q["q"])[:300],
             options=options,
-            type="quiz",
-            correct_option_id=shuffled_correct_index,
+            type="regular",
             is_anonymous=False,
         )
         await state.update_data(current_q_poll_id=sent.poll.id)
@@ -264,8 +279,49 @@ async def _send_test_question(bot: Bot, chat_id: int, state: FSMContext) -> None
     await state.set_state(TestMode.awaiting_answer)
 
 
-async def _process_test_answer(bot: Bot, chat_id: int, state: FSMContext, chosen_index: int, user_id: int) -> None:
+# متن hint وقتی سؤال فیلد "hint" نداره (الان یعنی هر ۵۱ سؤال، چون هنوز
+# hint واقعی ننوشتیم) - fallback عمومی، نه چیزی مخصوص یه سؤال خاص.
+_DEFAULT_HINT = "یه بار دیگه با دقت گزینه‌ها رو بخون؛ یکیشون از بقیه به متن دقیق‌تره."
+
+
+async def _show_hint_and_await_retry(bot: Bot, chat_id: int, state: FSMContext, data: dict) -> None:
+    """تلاش اول غلط بوده و هنوز finalize نشده. hint رو نشون می‌ده و منتظر
+    retry می‌مونه. مسیر دکمه و poll این‌جا از هم جدا می‌شن چون UI فرق داره:
+    دکمه یه کیبورد retry جدا لازم داره، ولی poll نیازی نداره چون خودِ
+    revote-کردن روی همون poll همون retry حساب می‌شه."""
+    hint_text = data.get("current_q_hint") or _DEFAULT_HINT
+    await state.update_data(current_q_hint_shown=True)
+
+    is_poll_question = data.get("current_q_poll_id") is not None
+    if is_poll_question:
+        await bot.send_message(
+            chat_id,
+            f"💡 {escape(hint_text)}\n\nرأیت رو عوض کن و گزینه‌ی دیگه‌ای رو انتخاب کن.",
+            parse_mode="HTML",
+        )
+    else:
+        await bot.send_message(
+            chat_id, f"💡 {escape(hint_text)}", reply_markup=test_retry_keyboard(), parse_mode="HTML"
+        )
+    # برای مسیر دکمه لازمه (هندلر test_retry با همین state فیلتر شده). برای
+    # مسیر poll اثر عملی نداره چون handle_test_poll_answer روی هیچ state‌ای
+    # فیلتر نشده - فقط برای consistency ست می‌شه.
+    await state.set_state(TestMode.awaiting_retry)
+
+
+async def _finalize_answer(
+    bot: Bot, chat_id: int, state: FSMContext, chosen_index: int, user_id: int, used_hint: bool
+) -> None:
+    """تنها نقطه‌ای که یه سؤال واقعاً scoring/log می‌شه - یا از تلاش اولِ
+    درست میاد اینجا، یا از تلاش دومِ (retry) درست/غلط. تلاش اولِ غلط هرگز
+    به این تابع نمی‌رسه (به‌جاش _show_hint_and_await_retry صدا زده می‌شه)."""
     data = await state.get_data()
+    if data.get("current_q_settled"):
+        # گارد نهایی؛ عملاً برای رأی سوم‌به‌بعد رو یه regular poll یا هر
+        # race دیگه‌ای که باعث بشه این تابع دوبار برای یه سؤال صدا زده بشه.
+        return
+    await state.update_data(current_q_settled=True)
+
     correct_index = data["current_q_correct_index"]
     options = data["current_q_options"]
     is_correct = chosen_index == correct_index
@@ -295,7 +351,10 @@ async def _process_test_answer(bot: Bot, chat_id: int, state: FSMContext, chosen
         is_correct=is_correct,
         seconds_taken=seconds_taken,
         session_id=data["test_session_id"],
+        used_hint=used_hint,
     )
+
+    record_active_day(user_id, datetime.now(timezone.utc).date())
 
     wrong_sections = data["test_wrong_sections"]
     if not is_correct:
@@ -312,6 +371,27 @@ async def _process_test_answer(bot: Bot, chat_id: int, state: FSMContext, chosen
     await state.set_state(TestMode.awaiting_next)
 
 
+async def _handle_test_answer_attempt(
+    bot: Bot, chat_id: int, state: FSMContext, chosen_index: int, user_id: int
+) -> None:
+    """نقطه‌ی ورودی مشترک هر دو مسیر (دکمه + poll) برای هر رأی/کلیک. تشخیص
+    «تلاش اول یا retry» و «آیا سؤال از قبل settle شده» فقط از روی
+    current_q_hint_shown/current_q_settled تو FSM data - نه از aiogram
+    state - چون هندلر poll_answer روی هیچ state‌ای فیلتر نیست."""
+    data = await state.get_data()
+    if data.get("current_q_settled"):
+        return
+
+    is_first_attempt = not data.get("current_q_hint_shown")
+    is_correct = chosen_index == data["current_q_correct_index"]
+
+    if is_first_attempt and not is_correct:
+        await _show_hint_and_await_retry(bot, chat_id, state, data)
+        return
+
+    await _finalize_answer(bot, chat_id, state, chosen_index, user_id, used_hint=not is_first_attempt)
+
+
 @router.callback_query(F.data == "test_next_question", TestMode.awaiting_next)
 async def handle_test_next_question(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -322,7 +402,24 @@ async def handle_test_next_question(callback: CallbackQuery, state: FSMContext):
 async def handle_test_choice(callback: CallbackQuery, state: FSMContext):
     chosen_index = int(callback.data.split(":")[1])
     await callback.answer()
-    await _process_test_answer(callback.bot, callback.message.chat.id, state, chosen_index, callback.from_user.id)
+    await _handle_test_answer_attempt(callback.bot, callback.message.chat.id, state, chosen_index, callback.from_user.id)
+
+
+@router.callback_query(F.data == "test_retry", TestMode.awaiting_retry)
+async def handle_test_retry(callback: CallbackQuery, state: FSMContext):
+    """فقط مسیر دکمه: همون سؤال (همون shuffle قبلی، بدون تغییر گزینه‌ها) رو
+    دوباره با test_choice_keyboard می‌فرسته و منتظر جواب دوم می‌مونه."""
+    await callback.answer()
+    data = await state.get_data()
+    questions = data["test_questions"]
+    index = data["test_index"]
+    q = questions[index]
+    options = data["current_q_options"]
+
+    header = f"📝 سوال {index + 1} از {len(questions)} (تلاش دوباره):\n\n"
+    text = header + escape(q["q"]) + "\n\n" + render_options_list(options)
+    await callback.message.answer(text, reply_markup=test_choice_keyboard(options), parse_mode="HTML")
+    await state.set_state(TestMode.awaiting_answer)
 
 
 @router.poll_answer()
@@ -333,7 +430,7 @@ async def handle_test_poll_answer(poll_answer: PollAnswer, state: FSMContext, bo
     if not poll_answer.option_ids:
         return  # کاربر رأیش رو پس گرفت (retract)، منتظر رأی بعدی می‌مونیم
     chosen_index = poll_answer.option_ids[0]
-    await _process_test_answer(bot, poll_answer.user.id, state, chosen_index, poll_answer.user.id)
+    await _handle_test_answer_attempt(bot, poll_answer.user.id, state, chosen_index, poll_answer.user.id)
 
 
 async def _finish_test(bot: Bot, chat_id: int, state: FSMContext) -> None:
@@ -376,12 +473,46 @@ async def _finish_test(bot: Bot, chat_id: int, state: FSMContext) -> None:
     else:
         lines.append("\n🎉 همه‌ی سؤال‌ها رو عالی زدی!")
 
-    # دکمه‌ها مستقیم زیر همین پیام میان (نه پیام جدا) - همون کاری که باعث
-    # می‌شد ۳-۴ تا پیام پشت‌سرهم بریزه، الان همه تو یکی جمع شده.
-    keyboard = review_sections_keyboard(weak_review_ids, retest_ids=weak_review_ids) if weak_review_ids else None
+    # قبلاً وقتی wrong_sections خالی بود (یعنی نتیجه‌ی نهایی همه درست)، هیچ
+    # کیبوردی فرستاده نمی‌شد - باگ اصلی همینجا بود. الان همیشه یه کیبورد
+    # ادامه‌مسیر می‌فرستیم: بر اساس نتیجه‌ی نهایی (بعد از احتساب retry)، نه
+    # صرفاً وجود weak_review_ids - چون ممکنه section_id از section_ref قابل
+    # استخراج نباشه ولی همچنان سؤال غلطی وجود داشته باشه.
+    if wrong_sections:
+        keyboard = test_result_needs_review_keyboard(weak_review_ids)
+    else:
+        keyboard = test_result_success_keyboard()
     await bot.send_message(chat_id, "\n".join(lines), reply_markup=keyboard)
 
     await state.clear()
+
+
+@router.callback_query(F.data == "test_again")
+async def handle_test_again(callback: CallbackQuery, state: FSMContext):
+    """دکمه‌ی «🧪 تست بیشتر بزنیم» بعد از نتیجه‌ی موفق. state تو _finish_test
+    با state.clear() پاک شده، پس هیچ داده‌ی session قبلی (test_questions,
+    test_index, current_q_* و...) باقی نمی‌مونه؛ prompt_test_count دقیقاً
+    همون مسیر ورودی عادی «چند تا سوال بزنیم؟» رو از اول شروع می‌کنه، پس
+    سناریوی «تست → پایان → تست بیشتر → تست جدید» توسط این پاک‌سازی همین
+    الان هم تضمین می‌شه."""
+    await callback.answer()
+    await prompt_test_count(callback.bot, callback.message.chat.id, state)
+
+
+@router.callback_query(F.data == "continue_lesson")
+async def handle_continue_lesson(callback: CallbackQuery, state: FSMContext):
+    """دکمه‌ی «📚 درس بخونیم» بعد از نتیجه‌ی موفق. طبق الگوی موجود پروژه
+    (diagnostic.py هم برای ورود به درس از enter_lesson تو lesson.py استفاده
+    می‌کنه)، همینجا هم همون تابع صدا زده می‌شه.
+
+    ⚠️ FACT-CHECK لازم قبل از اجرا: lesson.py تو این جلسه در اختیارم نبوده،
+    پس امضای enter_lesson (پارامترها، ترتیب آرگومان‌ها) رو حدس زدم بر اساس
+    الگوی توابع مشابه تو همین فایل (مثل prompt_test_count(bot, chat_id,
+    state)). قبل از تست واقعی، این import/فراخوانی رو با کد واقعی lesson.py
+    تطبیق بده - اگه امضا فرق داره، فقط همین یه خط نیاز به اصلاح داره."""
+    await callback.answer()
+    from bot.handlers.lesson import enter_lesson  # ایمپورت داخل تابع، برای جلوگیری از circular import با lesson.py
+    await enter_lesson(callback.bot, callback.message.chat.id, state)
 
 
 # ---------- فلش‌کارت ----------
@@ -438,6 +569,8 @@ async def handle_flashcard_selfcheck(callback: CallbackQuery, state: FSMContext)
         section_ref=card.get("section_ref", ""),
         knew_it=knew_it,
     )
+
+    record_active_day(callback.from_user.id, datetime.now(timezone.utc).date())
 
     await state.update_data(
         fc_known=data["fc_known"] + (1 if knew_it else 0),

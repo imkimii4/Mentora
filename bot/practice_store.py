@@ -26,7 +26,12 @@ def log_test_answer(
     is_correct: bool,
     seconds_taken: float,
     session_id: str,
+    used_hint: bool = False,
 ) -> None:
+    # used_hint اختیاریه و پیش‌فرضش False - رکوردهای قدیمی JSONL این فیلد رو
+    # ندارن و هیچ کد فعلی (get_session_accuracies) بهش نگاه نمی‌کنه، پس
+    # backward-compatible‌ه. correct_with_hint یعنی is_correct=True و
+    # used_hint=True با هم، نه یه مقدار جدا.
     _append({
         "type": "test",
         "user_id": user_id,
@@ -34,6 +39,7 @@ def log_test_answer(
         "question_id": question_id,
         "section_ref": section_ref,
         "is_correct": is_correct,
+        "used_hint": used_hint,
         "seconds_taken": round(seconds_taken, 1),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
@@ -87,3 +93,36 @@ def get_session_accuracies(user_id: int) -> list[tuple[str, int, int]]:
                 sessions[sid]["correct"] += 1
 
     return [(sid, sessions[sid]["correct"], sessions[sid]["total"]) for sid in order]
+
+
+def get_activity_dates(user_id: int) -> list[str]:
+    """فقط برای backfill Active Day (learning_state_store.py): تاریخ
+    تقویمی (YYYY-MM-DD، بر اساس timestamp ذخیره‌شده) هر رکورد test یا
+    flashcard این کاربر رو برمی‌گردونه - بدون aggregate، بدون فیلتر
+    session، بدون هیچ فیلد دیگه‌ای از رکورد خام. ممکنه تاریخ تکراری
+    داشته باشه (چند فعالیت یه روز) - dedupe مسئولیت مصرف‌کننده‌ست، نه
+    اینجا. هیچ تغییری تو schema یا رفتار لاگ‌گیری موجود ایجاد نمی‌کنه."""
+    if not _LOG_FILE.exists():
+        return []
+
+    dates: list[str] = []
+    with open(_LOG_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("user_id") != user_id or rec.get("type") not in ("test", "flashcard"):
+                continue
+            ts = rec.get("timestamp")
+            if not ts:
+                continue
+            try:
+                dates.append(datetime.fromisoformat(ts).date().isoformat())
+            except ValueError:
+                continue
+
+    return dates

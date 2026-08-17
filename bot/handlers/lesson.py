@@ -13,6 +13,7 @@
 from __future__ import annotations  # سازگاری type hint های جدید با پایتون ۳.۹
 
 import random
+from datetime import datetime, timezone
 
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
@@ -33,6 +34,8 @@ from bot.rule_engine import RuleEngine, QuizSession, TriggeredRule
 from bot.arabic_utils import compare_answers
 from bot.feedback_store import increment as increment_feedback
 from bot.progress_store import set_current_section, mark_section_complete
+from bot.lesson_quiz_store import log_quiz_answer
+from bot.learning_state_store import record_active_day
 from config import ADMIN_CHAT_ID
 
 router = Router()
@@ -283,6 +286,16 @@ async def handle_quiz_choice(callback: CallbackQuery, state: FSMContext):
     quiz = data["pending_quiz"]
     is_correct = chosen_index == quiz["correct_index"]
 
+    section = get_section(data["lesson_id"], data["section_index"])
+    log_quiz_answer(
+        user_id=callback.message.chat.id,
+        lesson_id=data["lesson_id"],
+        section_id=section["section_id"],
+        question_ref=data["message_index"],
+        quiz_type=quiz["quiz_type"],
+        is_correct=is_correct,
+    )
+
     await callback.answer("✅ درست بود!" if is_correct else "❌ غلط بود")
     feedback = _random_correct_feedback() if is_correct else (
         f"❌ جواب درست: {quiz['options'][quiz['correct_index']]}"
@@ -299,6 +312,16 @@ async def handle_fill_blank(message: Message, state: FSMContext):
     user_answer = (message.text or "").strip()
     correct_answer = quiz["correct_answer"].strip()
     is_correct, is_exact = compare_answers(user_answer, correct_answer)
+
+    section = get_section(data["lesson_id"], data["section_index"])
+    log_quiz_answer(
+        user_id=message.chat.id,
+        lesson_id=data["lesson_id"],
+        section_id=section["section_id"],
+        question_ref=data["message_index"],
+        quiz_type=quiz["quiz_type"],
+        is_correct=is_correct,
+    )
 
     if is_correct and is_exact:
         # اگه سؤال فیدبک اختصاصی داره از همون استفاده کن، وگرنه از استخر متنوع
@@ -360,6 +383,10 @@ async def _finish_section(bot: Bot, chat_id: int, state: FSMContext) -> None:
     # پس اگه کاربر یه section رو دوباره ببینه (مثلاً از انتخاب مستقیم بخش)،
     # duplicate اضافه نمی‌شه.
     mark_section_complete(chat_id, lesson_id, section["section_id"])
+
+    # تنها نقطه‌ی هوک Active Day برای فعالیت لسون (طبق تصمیم معماری Phase 2)؛
+    # عمداً تو _send_section_intro نیست - فقط اتمام واقعی یه section شمرده می‌شه.
+    record_active_day(chat_id, datetime.now(timezone.utc).date())
 
     # به‌جای رفتن خودکار به بخش بعد، صبر می‌کنیم تا کاربر یا فیدبک بده یا مستقیم بره جلو.
     await bot.send_message(

@@ -38,6 +38,9 @@ from bot.handlers.practice import prompt_test_count, prompt_flashcard_count
 from bot.handlers.profile_onboarding import start_profile_flow
 from bot.onboarding_store import has_onboarded, clear_onboarded
 from bot.profile_store import get_profile, clear_profile, is_profile_complete
+from bot.learning_state_store import clear_learning_state, get_streak
+from bot.profile_display_store import get_display, clear_display
+from bot.title_rank import get_title
 from bot.event_log import log_event
 from config import DEV_TEST_USER_IDS
 
@@ -92,6 +95,8 @@ async def handle_start(message: Message, state: FSMContext):
 _DEV_RESET_ACTIONS = [
     clear_onboarded,
     clear_profile,
+    clear_learning_state,
+    clear_display,
 ]
 
 
@@ -156,10 +161,12 @@ async def handle_menu_select_section(message: Message, state: FSMContext):
 
 @router.message(F.text == "👤 پروفایل من")
 async def handle_menu_profile(message: Message, state: FSMContext):
-    """فقط داده‌ی واقعی موجود در profile_store رو نشون می‌ده (نام، سن،
-    پایه، هدف، زمان مطالعه‌ی روزانه) - هیچ fake/placeholder data
-    (Level، Streak، تراز و...) اینجا تولید نمی‌شه؛ اون قابلیت‌ها هنوز
-    backend ندارن."""
+    """فقط داده‌ی واقعی رو نشون می‌ده: نام/سن/پایه/هدف/زمان مطالعه‌ی روزانه
+    از profile_store، استریک (current/longest) از learning_state_store،
+    عنوان/رتبه محاسبه‌شده‌ی dynamic (نه persisted) از title_rank بر اساس
+    همون current_streak، و در صورت وجود، عکس پروفایل از
+    profile_display_store - هیچ fake/placeholder data (Level، تراز و...)
+    اینجا تولید نمی‌شه؛ اون قابلیت‌ها هنوز backend ندارن."""
     if await _in_diagnostic(state):
         await message.answer("اول این ۳ سؤال رو تموم کن 🙂")
         return
@@ -180,4 +187,18 @@ async def handle_menu_profile(message: Message, state: FSMContext):
         f"هدف: {goal_label}\n"
         f"زمان مطالعه‌ی روزانه: {time_label}"
     )
-    await message.answer(text, parse_mode="HTML")
+
+    streak = get_streak(message.from_user.id)
+    text += f"\n\n🔥 استریک فعلی: {streak['current_streak']} روز"
+    if streak["longest_streak"] > streak["current_streak"]:
+        text += f"\n🏆 بهترین رکورد: {streak['longest_streak']} روز"
+
+    title = get_title(streak["current_streak"])
+    text += f"\n🎖 عنوان: {title}"
+
+    display = get_display(message.from_user.id)
+    photo_file_id = display.get("photo_file_id")
+    if photo_file_id:
+        await message.answer_photo(photo=photo_file_id, caption=text, parse_mode="HTML")
+    else:
+        await message.answer(text, parse_mode="HTML")
