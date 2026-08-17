@@ -31,12 +31,16 @@ def main_menu_reply_keyboard() -> ReplyKeyboardMarkup:
     keyboard که فقط زیر یه پیام خاصه و با اسکرول از چشم گم می‌شه، این همیشه
     پیداست، دقیقاً مثل منوی «/» که بات‌فادر می‌سازه ولی به‌شکل دکمه.
     لیبل «شروع درس» نه «ادامه» - چون resume واقعی هنوز نداریم، هر بار از اول
-    شروع می‌کنه؛ اسمش باید با رفتار واقعیش یکی باشه."""
+    شروع می‌کنه؛ اسمش باید با رفتار واقعیش یکی باشه.
+
+    ردیف «👤 پروفایل من» عمداً یه ردیف جدا و آخره - این فاز فقط قراره همین
+    یه دکمه به منوی موجود اضافه بشه، نه بازچینی کامل منو به یه چیدمان جدید."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📖 شروع درس")],
             [KeyboardButton(text="📑 انتخاب بخش")],
             [KeyboardButton(text="📝 تست بزن"), KeyboardButton(text="🎴 فلش‌کارت بخون")],
+            [KeyboardButton(text="👤 پروفایل من")],
         ],
         resize_keyboard=True,
     )
@@ -77,6 +81,15 @@ def test_choice_keyboard(options: list[str]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[buttons])
 
 
+def test_retry_keyboard() -> InlineKeyboardMarkup:
+    # فقط مسیر دکمه‌ی تست ازش استفاده می‌کنه (بعد از جواب غلط تلاش اول و
+    # نمایش hint). namespace جدا (test_retry) تا با test_choice/test_next_question
+    # قاطی نشه.
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="🔁 یه بار دیگه امتحان کن", callback_data="test_retry")]]
+    )
+
+
 def flashcard_count_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[
@@ -106,7 +119,12 @@ def review_sections_keyboard(section_ids: list[str], retest_ids: list[str] | Non
     """بعد از تست، به‌جای یه دکمه‌ی جدا برای هر بخش (که هم شلوغ می‌شد هم کاربر
     رو مجبور می‌کرد کل بخش رو برای یه سؤال بخونه)، فقط ۲ تا مسیر روشن می‌دیم:
     مرور سریع (فلش‌کارت، فقط نکته‌ی کلیدی) یا خوندن کامل بخش‌ها (به‌ترتیب،
-    با شمارش «چندتا مونده»). دکمه‌ی تمرین جدید هم همینجا کنارشونه."""
+    با شمارش «چندتا مونده»). دکمه‌ی تمرین جدید هم همینجا کنارشونه.
+
+    NOTE: این تابع دیگه از _finish_test صدا زده نمی‌شه (جاش رو
+    test_result_success_keyboard/test_result_needs_review_keyboard گرفتن)،
+    ولی خودِ تابع و هندلر retest_weak_sections که بهش وابسته‌ست حذف نشدن -
+    فقط دیگه دکمه‌ای بهشون منتهی نمی‌شه، برای اگه بعداً لازم شدن."""
     ids_param = ",".join(section_ids)
     rows = [
         [InlineKeyboardButton(text="🎴 مرور سریع (نکته‌های کلیدی)", callback_data=f"quick_review:{ids_param}")],
@@ -117,6 +135,34 @@ def review_sections_keyboard(section_ids: list[str], retest_ids: list[str] | Non
             InlineKeyboardButton(text="🔁 تمرین جدید همین بخش‌ها", callback_data=f"retest:{','.join(retest_ids)}")
         ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def test_result_success_keyboard() -> InlineKeyboardMarkup:
+    """بعد از پایان تست وقتی نتیجه‌ی نهایی همه‌ی سؤال‌ها درسته (با احتساب
+    retry) - دو مسیر ادامه: یه دور تست دیگه بزنه، یا برگرده تو درس.
+    callback_data های جدا و مستقل (test_again / continue_lesson) - قاطی
+    نمی‌شن با namespace های دیگه."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="🧪 تست بیشتر بزنیم", callback_data="test_again"),
+            InlineKeyboardButton(text="📚 درس بخونیم", callback_data="continue_lesson"),
+        ]]
+    )
+
+
+def test_result_needs_review_keyboard(section_ids: list[str]) -> InlineKeyboardMarkup:
+    """بعد از پایان تست وقتی کاربر تو حداقل یه سؤال (نهایتاً) مشکل داشته -
+    سه مسیر یادگیری. callback_data های review_queue/quick_review/next_section
+    از قبل تو پروژه وجود دارن (review_sections_keyboard و feedback_keyboard/
+    next_section_keyboard)، اینجا فقط دوباره استفاده می‌شن، بازسازی نشدن."""
+    ids_param = ",".join(section_ids)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 برو مرور کن", callback_data=f"review_queue:{ids_param}")],
+            [InlineKeyboardButton(text="➡️ بریم بخش بعد", callback_data="next_section")],
+            [InlineKeyboardButton(text="🧠 مرور نکات کلیدی", callback_data=f"quick_review:{ids_param}")],
+        ]
+    )
 
 
 def feedback_keyboard(section_id: str) -> InlineKeyboardMarkup:
@@ -160,3 +206,59 @@ def diagnostic_choice_keyboard(options: list[str]) -> InlineKeyboardMarkup:
         for i in range(len(options))
     ]
     return InlineKeyboardMarkup(inline_keyboard=[buttons])
+
+
+# --- Onboarding / User Profile (bot/handlers/profile_onboarding.py) ---
+# هر سه لیست (key, label) هستن: key تو callback_data می‌ره و در
+# profile_store ذخیره می‌شه (پایدار، مستقل از تغییر بعدی متن دکمه)، label
+# چیزیه که کاربر می‌بینه. لیست‌ها اینجان (نه تو handler) چون خودِ
+# profile_onboarding.py هم برای ساخت کیبورد هم برای اعتبارسنجی callback
+# بهشون نیاز داره - دقیقاً مثل OPTION_LETTERS بالا که renderer.py هم ازش
+# استفاده می‌کنه.
+
+GRADE_OPTIONS: list[tuple[str, str]] = [
+    ("g7", "هفتم"),
+    ("g8", "هشتم"),
+    ("g9", "نهم"),
+    ("g10", "دهم"),
+    ("g11", "یازدهم"),
+    ("g12", "دوازدهم"),
+    ("grad", "فارغ‌التحصیل / کنکوری"),
+]
+
+GOAL_OPTIONS: list[tuple[str, str]] = [
+    ("school_exam", "📘 امتحان مدرسه"),
+    ("konkur", "🎯 کنکور"),
+    ("deep_learning", "🧠 یادگیری عمیق"),
+    ("weak_points", "🔧 تقویت نقاط ضعف"),
+]
+
+DAILY_TIME_OPTIONS: list[tuple[str, str]] = [
+    ("lt15", "کمتر از ۱۵ دقیقه"),
+    ("15_30", "۱۵ تا ۳۰ دقیقه"),
+    ("30_60", "۳۰ تا ۶۰ دقیقه"),
+    ("gt60", "بیشتر از ۱ ساعت"),
+]
+
+
+def _chunked_choice_keyboard(
+    options: list[tuple[str, str]], callback_prefix: str, per_row: int = 2
+) -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(text=label, callback_data=f"{callback_prefix}:{key}")
+        for key, label in options
+    ]
+    rows = [buttons[i:i + per_row] for i in range(0, len(buttons), per_row)]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def grade_choice_keyboard() -> InlineKeyboardMarkup:
+    return _chunked_choice_keyboard(GRADE_OPTIONS, "profile_grade", per_row=2)
+
+
+def goal_choice_keyboard() -> InlineKeyboardMarkup:
+    return _chunked_choice_keyboard(GOAL_OPTIONS, "profile_goal", per_row=2)
+
+
+def daily_time_choice_keyboard() -> InlineKeyboardMarkup:
+    return _chunked_choice_keyboard(DAILY_TIME_OPTIONS, "profile_time", per_row=2)

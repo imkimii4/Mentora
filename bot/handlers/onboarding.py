@@ -5,15 +5,19 @@
 FSM state - چون handle_start همیشه state.clear() می‌زنه و هر state قبلی رو
 پاک می‌کنه؛ تنها منبع پایدار onboarding_status.json روی دیسکه.
 
-کاربر جدید: پیام کوتاه + انتخاب مسیر (شروع سریع / آزمون تشخیصی) از
-diagnostic.py؛ هیچ reply keyboardی هنوز فرستاده نمی‌شه.
+کاربر جدید: قبل از هرچیز از مسیر Onboarding/Profile (profile_onboarding.py)
+رد می‌شه - نام/سن/پایه/هدف/زمان مطالعه - و بعدش انتخاب مسیر (شروع سریع /
+آزمون تشخیصی) از diagnostic.py؛ هیچ reply keyboardی تا پایان همه‌ی این‌ها
+فرستاده نمی‌شه. start_profile_flow خودش تشخیص می‌ده کاربر کاملاً جدیده یا
+باید از یه فیلد ناقص ادامه بده (رجوع به profile_onboarding.py).
 کاربر برگشتی: دقیقاً همون رفتار قبلی (خوش‌آمد + منوی اصلی)، بدون تغییر.
 
 گارد DiagnosticFlow روی ۴ دکمه‌ی منوی اصلی: چون این‌ها F.text ساده‌ن (بدون
 فیلتر state) و بدون تغییر می‌تونستن Diagnostic رو وسط کار قطع کنن. ریسک
 اصلیش با این پلن از ریشه حذف شده (تا پایان Diagnostic اصلاً reply keyboardی
 رو صفحه نیست)، این گارد فقط لایه‌ی دفاعی دومه برای حالت لبه‌ای که یه کیبورد
-قدیمی از قبل مونده باشه.
+قدیمی از قبل مونده باشه. همین منطق دقیقاً برای ProfileOnboarding هم صادقه
+(اونم قبل از هر reply keyboardی اتفاق می‌افته) - گارد جدا براش لازم نیست.
 """
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
@@ -21,12 +25,19 @@ from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 
 from bot.states import DiagnosticFlow
-from bot.keyboards import main_menu_reply_keyboard, section_list_keyboard
+from bot.keyboards import (
+    main_menu_reply_keyboard,
+    section_list_keyboard,
+    GRADE_OPTIONS,
+    GOAL_OPTIONS,
+    DAILY_TIME_OPTIONS,
+)
 from bot.data_loader import load_lesson
 from bot.handlers.lesson import enter_lesson
 from bot.handlers.practice import prompt_test_count, prompt_flashcard_count
-from bot.handlers.diagnostic import send_onboarding_choice
+from bot.handlers.profile_onboarding import start_profile_flow
 from bot.onboarding_store import has_onboarded, clear_onboarded
+from bot.profile_store import get_profile, clear_profile, is_profile_complete
 from bot.event_log import log_event
 from config import DEV_TEST_USER_IDS
 
@@ -66,8 +77,12 @@ async def handle_start(message: Message, state: FSMContext):
         )
         return
 
-    log_event(user_id, "start")
-    await send_onboarding_choice(message.bot, message.chat.id)
+    # log_event("start") فقط یه‌بار، برای اولین /start واقعی کاربر - نه هر
+    # بار که resume می‌شه. تشخیصش از روی پروفایل: اگه هنوز هیچ فیلدی از
+    # پروفایل ثبت نشده، این واقعاً اولین ورود کاربره.
+    if get_profile(user_id) is None:
+        log_event(user_id, "start")
+    await start_profile_flow(message.bot, message.chat.id, user_id, state)
 
 
 # نقطه‌ی واحد ریست برای محیط توسعه. هر بخشی از داده‌ی کاربر که بعداً اضافه
@@ -76,6 +91,7 @@ async def handle_start(message: Message, state: FSMContext):
 # و اسم Command دیگه لازم نیست تغییر کنه.
 _DEV_RESET_ACTIONS = [
     clear_onboarded,
+    clear_profile,
 ]
 
 
@@ -136,3 +152,32 @@ async def handle_menu_select_section(message: Message, state: FSMContext):
         "کدوم بخش رو می‌خوای بخونی؟",
         reply_markup=section_list_keyboard(lesson["sections"]),
     )
+
+
+@router.message(F.text == "👤 پروفایل من")
+async def handle_menu_profile(message: Message, state: FSMContext):
+    """فقط داده‌ی واقعی موجود در profile_store رو نشون می‌ده (نام، سن،
+    پایه، هدف، زمان مطالعه‌ی روزانه) - هیچ fake/placeholder data
+    (Level، Streak، تراز و...) اینجا تولید نمی‌شه؛ اون قابلیت‌ها هنوز
+    backend ندارن."""
+    if await _in_diagnostic(state):
+        await message.answer("اول این ۳ سؤال رو تموم کن 🙂")
+        return
+    profile = get_profile(message.from_user.id)
+    if not profile or not is_profile_complete(profile):
+        await message.answer("هنوز پروفایلت کامل نشده 🙂")
+        return
+
+    grade_label = dict(GRADE_OPTIONS).get(profile["grade"], profile["grade"])
+    goal_label = dict(GOAL_OPTIONS).get(profile["goal"], profile["goal"])
+    time_label = dict(DAILY_TIME_OPTIONS).get(profile["daily_minutes"], profile["daily_minutes"])
+
+    text = (
+        "👤 <b>پروفایل من</b>\n\n"
+        f"نام: {profile['name']}\n"
+        f"سن: {profile['age']}\n"
+        f"پایه: {grade_label}\n"
+        f"هدف: {goal_label}\n"
+        f"زمان مطالعه‌ی روزانه: {time_label}"
+    )
+    await message.answer(text, parse_mode="HTML")

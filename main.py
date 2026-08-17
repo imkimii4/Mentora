@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import BOT_TOKEN
-from bot.handlers import onboarding, diagnostic, lesson, practice
+from bot.handlers import onboarding, profile_onboarding, diagnostic, lesson, practice
 
 logging.basicConfig(level=logging.INFO)
 
@@ -20,6 +20,7 @@ async def main() -> None:
     dp = Dispatcher(storage=storage)
 
     dp.include_router(onboarding.router)
+    dp.include_router(profile_onboarding.router)
     dp.include_router(diagnostic.router)
     dp.include_router(lesson.router)
     dp.include_router(practice.router)

@@ -55,6 +55,12 @@ class TestMode(StatesGroup):
     و در پایان یه خلاصه‌ی نتیجه (درصد + تفکیک بخش‌های پرغلط) نشون داده می‌شه."""
     choosing_count = State()
     awaiting_answer = State()
+    # تلاش اول غلط بوده؛ hint نمایش داده شده، منتظر کلیک "تلاش دوباره" هستیم.
+    # فقط مسیر دکمه از این state استفاده می‌کنه؛ هندلر poll_answer روی هیچ
+    # state‌ای فیلتر نشده و تشخیصش رو از current_q_hint_shown/current_q_settled
+    # تو FSM data می‌ده (نه از این state)، چون aiogram هندلر poll_answer رو
+    # مستقل از state فعلی صدا می‌زنه.
+    awaiting_retry = State()
     awaiting_next = State()
 
 
@@ -65,3 +71,20 @@ class FlashcardMode(StatesGroup):
     choosing_count = State()
     awaiting_reveal = State()
     awaiting_selfcheck = State()
+
+
+class ProfileOnboarding(StatesGroup):
+    """مسیر جمع‌آوری پروفایل کاربر جدید، قبل از انتخاب شروع سریع/آزمون
+    تشخیصی (DiagnosticFlow) و قبل از S1. یه state به‌ازای هر سؤال - دقیقاً
+    هم‌الگوی DiagnosticFlow.q1/q2/q3، چون هدف مشابهه: تشخیص اینکه پیام یا
+    کلیک بعدی کاربر مربوط به کدوم سؤاله.
+
+    نکته‌ی مهم: چون FSMContext با MemoryStorage روی هر ری‌استارت پاک
+    می‌شه، این state ها به‌تنهایی منبع resume نیستن - منبع واقعی resume
+    فایل persistent در bot/profile_store.py است؛ این state ها فقط برای
+    فیلتر هندلر پیام/کالبک فعلی استفاده می‌شن."""
+    name = State()
+    age = State()
+    grade = State()
+    goal = State()
+    daily_time = State()
