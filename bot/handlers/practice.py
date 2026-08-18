@@ -441,13 +441,16 @@ async def _finish_test(bot: Bot, chat_id: int, state: FSMContext) -> None:
     fast_answers = data.get("test_fast_answers", 0)
     user_id = chat_id  # چت خصوصیه، چت‌آیدی همون یوزرآیدیه
 
-    # --- یه پیام واحد و جمع‌وجور، به‌جای ۳-۴ تا پیام پشت‌سرهم ---
-    lines = [f"از {total} سؤالی که جواب دادی،\n✅ {correct} تاش رو عالی زدی"]
-    if total - correct:
-        lines.append(f"📚 {total - correct} تای دیگه فرصت دارن که بهتر بشن")
-
     pct = round((correct / total) * 100) if total else 0
-    lines.append(f"\nنتیجه‌ی تست: {pct}٪")
+
+    # فاز 5C: بازطراحی presentation - همون داده‌های واقعی (total/correct/
+    # pct/wrong_sections)، فقط متن خواناتر و دوستانه‌تر با یه هدر مشخص و
+    # خطوط جدا برای هر بخش. منطق retry/hint/poll/محاسبه‌ی این مقادیر دست‌نخورده.
+    lines = [f"🎯 نتیجه‌ی تست\nاز {total} سؤالی که جواب دادی:"]
+    lines.append(f"✅ {correct} تا رو عالی زدی")
+    if total - correct:
+        lines.append(f"📚 {total - correct} تا هنوز جا برای بهتر شدن دارن")
+    lines.append(f"📊 نتیجه: {pct}٪")
 
     # تشخیص جواب‌دادن خیلی سریع (احتمال شانسی‌زدن) - فقط یه یادآوری ملایم،
     # نه قضاوت. با داده‌ای که همین الان هم لاگ می‌شه (seconds_taken).
@@ -462,9 +465,9 @@ async def _finish_test(bot: Bot, chat_id: int, state: FSMContext) -> None:
         counts: dict[str, int] = {}
         for section in wrong_sections:
             counts[section] = counts.get(section, 0) + 1
-        lines.append("\nجایی که می‌تونی قوی‌تر بشی:")
+        lines.append("\nجایی که یه مرور کوچیک بهش میاد:")
         for section, cnt in sorted(counts.items(), key=lambda item: -item[1]):
-            lines.append(f"• {section}: {cnt} سؤال نیاز به مرور داره")
+            lines.append(f"• {section}: {cnt} سؤال")
 
         for section in wrong_sections:
             for sid in _extract_section_ids(section):

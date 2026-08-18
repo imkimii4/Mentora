@@ -253,15 +253,9 @@ async def handle_daily_time(callback: CallbackQuery, state: FSMContext) -> None:
     await _finalize_choice_message(callback, f"✅ زمان مطالعه: {label}")
     await state.set_state(None)
 
-    # پیام پایانی شخصی‌سازی‌شده با اسم واقعی کاربر - قبل از دعوت موجود به
-    # شروع سریع/آزمون تشخیصی (send_onboarding_choice)، بدون تغییر در خودِ
-    # اون تابع/فایل (diagnostic.py).
-    profile = get_profile(callback.from_user.id)
-    name = (profile or {}).get("name")
-    if name:
-        await callback.bot.send_message(
-            callback.message.chat.id,
-            f"{name}، از همین الان با هم شروع می‌کنیم 🌱",
-        )
-
+    # فاز 5C: پیام پایانی جدای «{name}، از همین الان شروع می‌کنیم» عمداً
+    # حذف شد - باعث دو تا خوش‌آمد پشت‌سرهم می‌شد، چون send_onboarding_choice
+    # (diagnostic.py) خودش الان یه خوش‌آمد شخصی و زمان‌محور
+    # (time_based_greeting، با همین اسم از profile_store) می‌فرسته. یه
+    # تجربه‌ی یکپارچه به‌جای دو پیام جدا.
     await send_onboarding_choice(callback.bot, callback.message.chat.id)

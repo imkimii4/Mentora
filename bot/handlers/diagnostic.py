@@ -23,7 +23,9 @@ practice_store logging و...) مخصوص مسیر «تست بزن» از منو�
 from __future__ import annotations
 
 import random
+from datetime import datetime
 from html import escape
+from zoneinfo import ZoneInfo
 
 from aiogram import Router, F, Bot
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
@@ -39,9 +41,40 @@ from bot.keyboards import (
 )
 from bot.handlers.lesson import enter_lesson
 from bot.onboarding_store import mark_onboarded
+from bot.profile_store import get_profile
 from bot.event_log import log_event
 
 router = Router()
+
+# فاز 5C: خوش‌آمد شخصی و زمان‌محور (نام کاربر + ساعت محلی ایران)، به‌جای
+# پیام ثابت «سلام! به Mentora خوش اومدی». اینجا تعریف شده (نه onboarding.py)
+# چون send_onboarding_choice پایین همین فایل اولین مصرف‌کننده‌شه؛
+# onboarding.py برای کاربر برگشتی همین تابع رو import می‌کنه - تا متن و
+# منطق greeting یه‌جا و یکسان بمونه، نه تکراری تو دو فایل.
+_TEHRAN_TZ = ZoneInfo("Asia/Tehran")
+
+
+def _time_of_day_greeting() -> str:
+    """بر اساس ساعت محلی Asia/Tehran (نه datetime.now() خام سرور/UTC)."""
+    hour = datetime.now(_TEHRAN_TZ).hour
+    if 5 <= hour < 12:
+        return "صبح بخیر"
+    if 12 <= hour < 15:
+        return "ظهر بخیر"
+    if 15 <= hour < 19:
+        return "عصر بخیر"
+    return "شب بخیر"  # ۱۹:۰۰ تا ۰۴:۵۹
+
+
+def time_based_greeting(name: str | None) -> str:
+    """پیام خوش‌آمد HTML-safe؛ name اگه موجود نباشه (نظری، چون این مرحله
+    بعد از تکمیل پروفایله) فقط بدون اسم برمی‌گرده. parse_mode="HTML" لازم
+    داره چون <b>Mentora</b> توشه - دقیقاً جایگزین متن ثابت قبلی."""
+    greeting = _time_of_day_greeting()
+    if name:
+        return f"{greeting} {escape(name)}! 🌟\nبه <b>Mentora</b> خوش اومدی."
+    return f"{greeting}! 🌟\nبه <b>Mentora</b> خوش اومدی."
+
 
 _DIAGNOSTIC_QUESTION_COUNT = 3
 
@@ -66,13 +99,22 @@ def _enter_lesson_keyboard() -> InlineKeyboardMarkup:
 
 
 async def send_onboarding_choice(bot: Bot, chat_id: int) -> None:
-    """از onboarding.py صدا زده می‌شه، فقط برای کاربر جدید (بعد از /start).
-    عمداً reply keyboard اینجا فرستاده نمی‌شه - تا پایان مسیر (quick یا
+    """از profile_onboarding.py (بلافاصله بعد از تکمیل پروفایل) و از
+    onboarding.py/profile_onboarding.py (کاربری که پروفایلش کامله ولی
+    مسیر شروع سریع/تشخیصی رو هنوز انتخاب نکرده) صدا زده می‌شه. عمداً
+    reply keyboard اینجا فرستاده نمی‌شه - تا پایان مسیر (quick یا
     diagnostic) کاربر هیچ reply keyboardی نمی‌بینه، پس دکمه‌ای برای تداخل
-    با Diagnostic روی صفحه نیست."""
+    با Diagnostic روی صفحه نیست.
+
+    فاز 5C: چت خصوصیه، پس chat_id == user_id (هم‌الگوی practice.py) - از
+    همین برای خوندن نام از profile_store استفاده می‌شه تا خوش‌آمد شخصی و
+    زمان‌محور باشه (time_based_greeting)، بدون نیاز به تغییر امضای این
+    تابع یا نقاط صداکننده‌ش."""
+    profile = get_profile(chat_id)
+    name = (profile or {}).get("name")
     await bot.send_message(
         chat_id,
-        "سلام! 🌟 به <b>Mentora</b> خوش اومدی.\n\n"
+        f"{time_based_greeting(name)}\n\n"
         "می‌تونی همین الان بری سراغ درس، یا اول یه آزمون کوتاه ۳ سؤالی بزنی "
         "تا با فضای سؤال‌ها آشنا بشی (نتیجه‌ش فقط یه راهنمای کلیه، دقیق نیست).",
         reply_markup=onboarding_choice_keyboard(),
